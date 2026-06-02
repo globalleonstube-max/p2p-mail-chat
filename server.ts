@@ -39,6 +39,15 @@ let messages: ChatMessage[] = [];
 let logs: LogItem[] = [];
 let activeChatContact: string | null = null;
 
+interface NodePingInfo {
+  latency: number | null;
+  status: "online" | "offline" | "checking" | "unknown";
+  lastChecked: string;
+}
+
+let nodePings: Record<string, NodePingInfo> = {};
+let heartbeatInterval: NodeJS.Timeout | null = null;
+
 // Multi-message compaction buffer (2-second interval)
 interface SendBuffer {
   messages: Array<{ to: string; body: string }>;
@@ -243,6 +252,45 @@ async function flushBuffer(recipient: string, queued: Array<{ to: string; body: 
   }
 }
 
+// Helper to simulate a P2P ping/pong heartbeat round-trip
+function runPingSimulation(peer: string) {
+  if (!daemonRunning) return "Ошибка: Ядро остановлено.";
+
+  nodePings[peer] = {
+    latency: null,
+    status: "checking",
+    lastChecked: new Date().toLocaleTimeString(),
+  };
+  emitSSE("nodePings", nodePings);
+
+  addLog("network", `[P2P HEARTBEAT] Sending ping probe to ${peer} (Protocol: [P2P-PING])...`);
+
+  const exists = knownNodes.has(peer);
+  const latency = Math.floor(120 + Math.random() * 260);
+
+  setTimeout(() => {
+    if (!daemonRunning) return;
+    if (exists) {
+      nodePings[peer] = {
+        latency,
+        status: "online",
+        lastChecked: new Date().toLocaleTimeString(),
+      };
+      addLog("success", `[P2P PONG] Received heartbeat reply from ${peer} in ${latency}ms`);
+    } else {
+      nodePings[peer] = {
+        latency: null,
+        status: "offline",
+        lastChecked: new Date().toLocaleTimeString(),
+      };
+      addLog("error", `[P2P TIMEOUT] Heartbeat packet to ${peer} timed out after 1500ms.`);
+    }
+    emitSSE("nodePings", nodePings);
+  }, 500 + Math.random() * 600);
+
+  return `Отправка пакета [P2P-PING] на узел ${peer}...`;
+}
+
 // Clean initialization of Daemon processes
 function startDaemon(mode: "simulation" | "real") {
   if (daemonRunning) return;
@@ -256,6 +304,7 @@ function startDaemon(mode: "simulation" | "real") {
   // Clear existing nodes and seed default bootstrap configs
   knownNodes.clear();
   nodeConfig.bootstrapEmails.forEach((email) => knownNodes.add(email));
+  nodePings = {};
 
   // Run Bootstrap Flow
   addLog("network", `[Bootstrap Discovery] Triggering entry protocol via ${nodeConfig.bootstrapUrl}...`);
@@ -264,9 +313,29 @@ function startDaemon(mode: "simulation" | "real") {
     nodeConfig.bootstrapEmails.forEach((email) => {
       addLog("info", `[Bootstrap JOIN] Sent [P2P-JOIN] protocol handshake to ${email}`);
     });
+    
+    // Automatically trigger health check for all discovered nodes
+    nodeConfig.bootstrapEmails.forEach((email) => {
+      runPingSimulation(email);
+    });
+
     emitSSE("nodes", Array.from(knownNodes));
     emitSSE("status", { running: daemonRunning, mode: daemonMode });
   }, 1000);
+
+  // Set up periodic heartbeat checks every 25 seconds for all active nodes in local db
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+  }
+  heartbeatInterval = setInterval(() => {
+    if (daemonRunning && knownNodes.size > 0) {
+      const nodeList = Array.from(knownNodes);
+      addLog("info", `[P2P Health System] Triggering periodic heartbeat checks for ${nodeList.length} peers...`);
+      nodeList.forEach((email) => {
+        runPingSimulation(email);
+      });
+    }
+  }, 25000);
 }
 
 function stopDaemon() {
@@ -274,6 +343,14 @@ function stopDaemon() {
   daemonRunning = false;
   addLog("info", `Stopping P2P Core Daemon...`);
   addLog("error", `Daemon stopped. All connections closed recursively.`);
+  
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+    heartbeatInterval = null;
+  }
+  nodePings = {};
+  emitSSE("nodePings", nodePings);
+  
   emitSSE("status", { running: daemonRunning, mode: daemonMode });
 }
 
@@ -302,13 +379,25 @@ function executeCLICommand(rawText: string): string {
 
   switch (cmd) {
     case "help":
-      return `Доступные команды:\n  status       - Проверить статус ядра P2P\n  nodes        - Вывести список известных узлов (peers)\n  chat <email> - Войти в диалог с указанным узлом\n  exit         - Выйти из приложения\n  help         - Показать эту справку`;
+      return `Доступные команды:\n  status       - Проверить статус ядра P2P\n  nodes        - Вывести список известных узлов (peers)\n  ping <email> - Отправить P2P heartbeat/ping узел\n  chat <email> - Войти в диалог с указанным узлом\n  exit         - Выйти из приложения\n  help         - Показать эту справку`;
     case "status":
       return `Core daemon: ${daemonRunning ? "RUNNING (online)" : "STOPPED (offline)"}\nNode ID: ${nodeConfig.email}\nTransport Layer: Email SMTP/IMAP protocol\nKnown active peers in directory: ${knownNodes.size}\nBuffered aggregated channels: ${outBuffers.size}`;
     case "nodes":
       const list = Array.from(knownNodes).sort();
       if (list.length === 0) return "Список известных узлов пуст.";
-      return `Список известных узлов сети:\n` + list.map((n, i) => `  [${i + 1}] ${n}`).join("\n");
+      return `Список известных узлов сети:\n` + list.map((n, i) => {
+        const ping = nodePings[n];
+        const pingStr = ping ? ` (${ping.status.toUpperCase()}, ${ping.latency ? `${ping.latency}ms` : "N/A"})` : " (UNKNOWN)";
+        return `  [${i + 1}] ${n}${pingStr}`;
+      }).join("\n");
+    case "ping":
+      if (args.length < 2) {
+        return "Использование: ping <email_адрес>";
+      }
+      if (!daemonRunning) {
+        return "Ошибка: Сначала запустите транспортное ядро Core Daemon!";
+      }
+      return runPingSimulation(args[1].trim());
     case "chat":
       if (args.length < 2) {
         return "Использование: chat <email_адрес>";
@@ -356,7 +445,8 @@ async function startServer() {
       nodes: Array.from(knownNodes),
       messages,
       logs,
-      activeChat: activeChatContact
+      activeChat: activeChatContact,
+      nodePings
     } })}\n\n`);
 
     req.on("close", () => {
@@ -373,7 +463,20 @@ async function startServer() {
       messages,
       logs,
       activeChat: activeChatContact,
+      nodePings,
     });
+  });
+
+  app.post("/api/peer/ping", (req, res) => {
+    const { email } = req.body;
+    if (!daemonRunning) {
+      return res.status(400).json({ error: "Core daemon is stopped. Launch it first." });
+    }
+    if (!email) {
+      return res.status(400).json({ error: "Email parameter required." });
+    }
+    runPingSimulation(email);
+    res.json({ status: "success", nodePings });
   });
 
   app.post("/api/config", (req, res) => {

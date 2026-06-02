@@ -17,7 +17,8 @@ import {
   Mail,
   HelpCircle,
   Clock,
-  ArrowRight
+  ArrowRight,
+  SlidersHorizontal
 } from "lucide-react";
 
 interface ChatMessage {
@@ -63,6 +64,13 @@ export default function App() {
   const [logs, setLogs] = useState<LogItem[]>([]);
   const [activeChat, setActiveChat] = useState<string | null>(null);
 
+  interface NodePingInfo {
+    latency: number | null;
+    status: "online" | "offline" | "checking" | "unknown";
+    lastChecked: string;
+  }
+  const [nodePings, setNodePings] = useState<Record<string, NodePingInfo>>({});
+
   // Tabs: "chat" or "terminal"
   const [activeTab, setActiveTab] = useState<"chat" | "terminal">("chat");
 
@@ -71,6 +79,7 @@ export default function App() {
   const [terminalInput, setTerminalInput] = useState("");
   const [manualPeerEmail, setManualPeerEmail] = useState("");
   const [showConfigAlert, setShowConfigAlert] = useState(false);
+  const [logFilter, setLogFilter] = useState<"all" | "info" | "success" | "error" | "network">("all");
 
   // History tracking for terminal inputs
   const [terminalHistory, setTerminalHistory] = useState<string[]>([]);
@@ -139,12 +148,16 @@ export default function App() {
             setMessages(data.messages);
             setLogs(data.logs);
             setActiveChat(data.activeChat);
+            setNodePings(data.nodePings || {});
             break;
           case "status":
             setDaemonState(data);
             break;
           case "nodes":
             setNodes(data);
+            break;
+          case "nodePings":
+            setNodePings(data);
             break;
           case "message":
             setMessages((prev) => [...prev, data]);
@@ -214,6 +227,21 @@ export default function App() {
       }
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  // Trigger peer ping probe manually over the grid
+  const handlePingNode = async (e: React.MouseEvent, nodeEmail: string) => {
+    e.stopPropagation(); // Avoid switching current chat target on ping click
+    if (!daemonState.running) return;
+    try {
+      await fetch("/api/peer/ping", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: nodeEmail })
+      });
+    } catch (err) {
+      console.error("Ping node trigger failed:", err);
     }
   };
 
@@ -318,6 +346,12 @@ export default function App() {
       (m.from === activeChat && m.to === config.email) ||
       (m.from === config.email && m.to === activeChat)
   );
+
+  // Filter logs based on active log filter category
+  const filteredLogs = logs.filter((log) => {
+    if (logFilter === "all") return true;
+    return log.type === logFilter;
+  });
 
   return (
     <div id="app_root" className="min-h-screen bg-sleek-bg font-sans text-[#e2e8f0] flex flex-col antialiased">
@@ -435,6 +469,33 @@ export default function App() {
                 nodes.map((node) => {
                   const isSimPeer = node.endsWith("@p2p.net");
                   const isActive = activeChat === node;
+                  const ping = nodePings[node];
+
+                  // Calculate stats indicator colors and output
+                  let dotColor = "bg-slate-600";
+                  let pingText = "offline";
+                  let isChecking = false;
+
+                  if (ping) {
+                    if (ping.status === "checking") {
+                      dotColor = "bg-amber-400 animate-pulse";
+                      pingText = "checking";
+                      isChecking = true;
+                    } else if (ping.status === "online") {
+                      dotColor = "bg-[#22c55e]";
+                      pingText = ping.latency ? `${ping.latency}ms` : "online";
+                    } else if (ping.status === "offline") {
+                      dotColor = "bg-rose-500";
+                      pingText = "timeout";
+                    } else {
+                      dotColor = "bg-slate-500";
+                      pingText = "unknown";
+                    }
+                  } else {
+                    dotColor = isSimPeer ? "bg-blue-400" : "bg-slate-600";
+                    pingText = "unknown";
+                  }
+
                   return (
                     <button
                       key={node}
@@ -445,13 +506,36 @@ export default function App() {
                           : "bg-[#1a1d23]/40 border-transparent text-[#94a3b8] hover:bg-[#1a1d23] hover:text-[#e2e8f0]"
                       }`}
                     >
-                      <div className="flex items-center gap-2 overflow-hidden">
-                        <div className={`w-2 h-2 rounded-full shrink-0 ${isSimPeer ? "bg-blue-400" : "bg-[#22c55e]"}`} />
-                        <span className="text-sm truncate font-medium font-sans">
+                      <div className="flex items-center gap-2 overflow-hidden flex-1">
+                        <div className={`w-2 h-2 rounded-full shrink-0 ${dotColor}`} />
+                        <span className="text-xs truncate font-medium font-sans">
                           {node}
                         </span>
                       </div>
-                      <ArrowRight className={`w-3.5 h-3.5 shrink-0 transition ${isActive ? "text-blue-400 rotate-90" : "text-slate-600"}`} />
+                      
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {pingText && (
+                          <span className={`text-[9px] font-mono font-bold tracking-tight px-1.5 py-0.5 rounded leading-none ${
+                            ping?.status === 'online' ? 'bg-[#22c55e]/15 text-emerald-400 border border-emerald-500/20' :
+                            ping?.status === 'checking' ? 'bg-amber-500/15 text-amber-400 border border-amber-500/20' :
+                            ping?.status === 'offline' ? 'bg-rose-500/15 text-rose-400 border border-rose-500/20' : 'bg-slate-900/40 text-slate-500 border border-sleek-border'
+                          }`}>
+                            {pingText}
+                          </span>
+                        )}
+                        
+                        <button
+                          type="button"
+                          disabled={!daemonState.running}
+                          onClick={(e) => handlePingNode(e, node)}
+                          title="Отправить проверочный Heartbeat P2P-пакет"
+                          className="p-1 rounded text-[#64748b] hover:text-blue-400 hover:bg-sleek-card transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                        >
+                          <Activity className={`w-3 h-3 ${isChecking ? "animate-pulse text-amber-450" : ""}`} />
+                        </button>
+                        
+                        <ArrowRight className={`w-3.5 h-3.5 shrink-0 transition ${isActive ? "text-blue-400 rotate-90" : "text-slate-600"}`} />
+                      </div>
                     </button>
                   );
                 })
@@ -832,40 +916,112 @@ export default function App() {
           {activeTab === "terminal" && (
             <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#0f1115] font-mono text-xs">
               
-              {/* Commands quick helper tip block */}
-              <div className="p-3 bg-sleek-sidebar border-b border-sleek-border text-[10px] text-[#64748b] flex flex-wrap gap-x-4 gap-y-1.5 px-4 items-center justify-between">
-                <span className="flex items-center gap-1">
-                  <HelpCircle className="w-3.5 h-3.5 text-slate-400" />
-                  Экспресс команды:
-                </span>
-                <div className="flex gap-2">
-                  <button onClick={() => setTerminalInput("status")} className="bg-sleek-card hover:bg-sleek-bg text-slate-300 font-semibold px-2 py-0.5 border border-sleek-border rounded cursor-pointer">
-                    status
-                  </button>
-                  <button onClick={() => setTerminalInput("nodes")} className="bg-sleek-card hover:bg-sleek-bg text-slate-300 font-semibold px-2 py-0.5 border border-sleek-border rounded cursor-pointer">
-                    nodes
-                  </button>
-                  <button onClick={() => setTerminalInput("chat assistant@p2p.net")} className="bg-sleek-card hover:bg-sleek-bg text-slate-300 font-semibold px-2 py-0.5 border border-sleek-border rounded cursor-pointer">
-                    chat assistant@p2p.net
-                  </button>
-                  <button onClick={() => setTerminalInput("help")} className="bg-sleek-card hover:bg-sleek-bg text-slate-300 font-semibold px-2 py-0.5 border border-sleek-border rounded cursor-pointer">
-                    help
-                  </button>
+              {/* Commands quick helper tip block and Log Filters */}
+              <div className="p-3 bg-sleek-sidebar border-b border-sleek-border text-[10px] text-[#64748b] flex flex-col gap-2.5 md:flex-row md:items-center md:justify-between px-4">
+                <div className="flex flex-wrap gap-x-4 gap-y-1.5 items-center">
+                  <span className="flex items-center gap-1">
+                    <HelpCircle className="w-3.5 h-3.5 text-slate-450" />
+                    Экспресс команды:
+                  </span>
+                  <div className="flex gap-2">
+                    <button onClick={() => setTerminalInput("status")} className="bg-sleek-card hover:bg-sleek-bg text-slate-300 font-semibold px-2 py-0.5 border border-sleek-border rounded cursor-pointer">
+                      status
+                    </button>
+                    <button onClick={() => setTerminalInput("nodes")} className="bg-sleek-card hover:bg-sleek-bg text-slate-300 font-semibold px-2 py-0.5 border border-sleek-border rounded cursor-pointer">
+                      nodes
+                    </button>
+                    <button onClick={() => setTerminalInput("chat assistant@p2p.net")} className="bg-sleek-card hover:bg-sleek-bg text-slate-300 font-semibold px-2 py-0.5 border border-sleek-border rounded cursor-pointer">
+                      chat assistant@p2p.net
+                    </button>
+                    <button onClick={() => setTerminalInput("help")} className="bg-sleek-card hover:bg-sleek-bg text-slate-300 font-semibold px-2 py-0.5 border border-sleek-border rounded cursor-pointer">
+                      help
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-x-3 gap-y-1.5 items-center border-t border-sleek-border/40 pt-2.5 md:border-t-0 md:pt-0">
+                  <span className="flex items-center gap-1 text-[10px]">
+                    <SlidersHorizontal className="w-3.5 h-3.5 text-blue-400" />
+                    Фильтр трафика:
+                  </span>
+                  <div className="flex gap-1.5 text-[9px] font-mono">
+                    <button
+                      onClick={() => setLogFilter("all")}
+                      className={`px-2 py-0.5 border rounded cursor-pointer font-bold transition ${
+                        logFilter === "all"
+                          ? "bg-[#3b82f6] text-white border-[#3b82f6]"
+                          : "bg-sleek-card hover:bg-sleek-bg text-slate-400 border-sleek-border"
+                      }`}
+                    >
+                      ALL ({logs.length})
+                    </button>
+                    <button
+                      onClick={() => setLogFilter("info")}
+                      className={`px-2 py-0.5 border rounded cursor-pointer font-bold transition ${
+                        logFilter === "info"
+                          ? "bg-blue-500/20 text-blue-400 border-blue-500/40"
+                          : "bg-sleek-card hover:bg-sleek-bg text-[#64748b] border-sleek-border"
+                      }`}
+                    >
+                      INFO ({logs.filter((l) => l.type === "info").length})
+                    </button>
+                    <button
+                      onClick={() => setLogFilter("success")}
+                      className={`px-2 py-0.5 border rounded cursor-pointer font-bold transition ${
+                        logFilter === "success"
+                          ? "bg-emerald-500/20 text-emerald-405 border-emerald-500/40"
+                          : "bg-sleek-card hover:bg-sleek-bg text-[#64748b] border-sleek-border"
+                      }`}
+                    >
+                      SUCCESS ({logs.filter((l) => l.type === "success").length})
+                    </button>
+                    <button
+                      onClick={() => setLogFilter("error")}
+                      className={`px-2 py-0.5 border rounded cursor-pointer font-bold transition ${
+                        logFilter === "error"
+                          ? "bg-rose-500/20 text-rose-455 border-rose-500/40"
+                          : "bg-sleek-card hover:bg-sleek-bg text-[#64748b] border-sleek-border"
+                      }`}
+                    >
+                      ERRORS ({logs.filter((l) => l.type === "error").length})
+                    </button>
+                    <button
+                      onClick={() => setLogFilter("network")}
+                      className={`px-2 py-0.5 border rounded cursor-pointer font-bold transition ${
+                        logFilter === "network"
+                          ? "bg-cyan-500/20 text-cyan-400 border-cyan-500/40"
+                          : "bg-sleek-card hover:bg-sleek-bg text-[#64748b] border-sleek-border"
+                      }`}
+                    >
+                      NET ({logs.filter((l) => l.type === "network").length})
+                    </button>
+                  </div>
                 </div>
               </div>
 
               {/* Terminal list history logs stream */}
               <div className="flex-1 overflow-y-auto p-4 space-y-1.5 scrollbar-thin scroll-smooth select-text select-allselection:bg-slate-820 font-mono leading-relaxed h-[calc(100vh-280px)]">
-                <div className="text-slate-500 border-b border-sleek-border pb-2 mb-3 text-[10px]">
-                  P2P Mail Chat Client Terminal Core v1.0.0 (Go emulator). Evaluator active.
-                  <br />
-                  Log level: DEBUG. Standard IO bound to SSE socket.
+                <div className="text-slate-500 border-b border-sleek-border pb-2 mb-3 text-[10px] flex justify-between items-center">
+                  <span>
+                    P2P Mail Chat Client Terminal Core v1.0.0 (Go emulator). Evaluator active.
+                    <br />
+                    Log level: DEBUG. Standard IO bound to SSE socket.
+                  </span>
+                  {logFilter !== "all" && (
+                    <span className="text-[9px] bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded animate-pulse">
+                      Фокус на: {logFilter.toUpperCase()} (Показано {filteredLogs.length} из {logs.length})
+                    </span>
+                  )}
                 </div>
 
-                {logs.length === 0 ? (
-                  <div className="text-slate-600 italic">No activity logs recorded. Launch the daemon node.</div>
+                {filteredLogs.length === 0 ? (
+                  <div className="text-slate-600 italic py-4">
+                    {logs.length === 0 
+                      ? "No activity logs recorded. Launch the daemon node."
+                      : `No logs of type "${logFilter}" match the current active filter.`}
+                  </div>
                 ) : (
-                  logs.map((log) => {
+                  filteredLogs.map((log) => {
                     let typeColor = "text-slate-400";
                     let prefix = "📎";
                     switch (log.type) {
