@@ -21,6 +21,7 @@
     "mailparser": "^3.9.9",
     "motion": "^12.23.24",
     "nodemailer": "^8.0.10",
+    "qrcode.react": "^4.2.0",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "vite": "^6.2.3"

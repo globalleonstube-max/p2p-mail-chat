@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
+import { QRCodeSVG } from "qrcode.react";
+import { motion, AnimatePresence } from "motion/react";
 import {
   Shield,
   Activity,
@@ -18,7 +20,11 @@ import {
   HelpCircle,
   Clock,
   ArrowRight,
-  SlidersHorizontal
+  SlidersHorizontal,
+  QrCode,
+  Copy,
+  Check,
+  X
 } from "lucide-react";
 
 interface ChatMessage {
@@ -70,6 +76,148 @@ export default function App() {
     lastChecked: string;
   }
   const [nodePings, setNodePings] = useState<Record<string, NodePingInfo>>({});
+  const [handshakeQueue, setHandshakeQueue] = useState<Array<{ email: string; id: string }>>([]);
+
+  const prevPingsRef = useRef<Record<string, string>>({});
+
+  useEffect(() => {
+    const newHandshakes: string[] = [];
+    Object.keys(nodePings).forEach((email) => {
+      const info = nodePings[email];
+      const prevStatus = prevPingsRef.current[email];
+      if (info.status === "online" && prevStatus !== "online") {
+        newHandshakes.push(email);
+      }
+    });
+
+    const nextStatuses: Record<string, string> = {};
+    Object.keys(nodePings).forEach((email) => {
+      const info = nodePings[email];
+      nextStatuses[email] = info.status;
+    });
+    prevPingsRef.current = nextStatuses;
+
+    if (newHandshakes.length > 0) {
+      newHandshakes.forEach((email) => {
+        const id = Math.random().toString();
+        setHandshakeQueue((prev) => [...prev, { email, id }]);
+        setTimeout(() => {
+          setHandshakeQueue((prev) => prev.filter((item) => item.id !== id));
+        }, 3500);
+      });
+    }
+  }, [nodePings]);
+
+  const [copiedNode, setCopiedNode] = useState<string | null>(null);
+
+  const handleCopyNode = (e: React.MouseEvent, email: string) => {
+    e.stopPropagation();
+    navigator.clipboard.writeText(email);
+    setCopiedNode(email);
+    setTimeout(() => {
+      setCopiedNode(null);
+    }, 1500);
+  };
+
+  const [isOnline, setIsOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
+  const [simulatedOffline, setSimulatedOffline] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [unsyncedMessages, setUnsyncedMessages] = useState<Array<{ id: string; from: string; to: string; body: string; timestamp: string }>>(() => {
+    try {
+      const saved = localStorage.getItem("unsynced_p2p_messages");
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const isEffectivelyOffline = !isOnline || simulatedOffline;
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("unsynced_p2p_messages", JSON.stringify(unsyncedMessages));
+    } catch (e) {
+      console.error("Local storage write error:", e);
+    }
+  }, [unsyncedMessages]);
+
+  const handleSyncLocalMessages = async () => {
+    if (unsyncedMessages.length === 0) return;
+    
+    let isPhysicallyOnline = isOnline;
+    if (simulatedOffline && isOnline) {
+      setSimulatedOffline(false);
+    }
+
+    if (!isPhysicallyOnline) {
+      alert("Device physical connection is offline. Please reconnect prior to syncing message frames.");
+      return;
+    }
+
+    setIsSyncing(true);
+    setLogs((prev) => {
+      const logItem = {
+        id: Math.random().toString(),
+        timestamp: new Date().toLocaleTimeString(),
+        type: "info" as const,
+        message: `[P2P SYNC] Initiating synchronization of ${unsyncedMessages.length} deferred P2P message frame(s)...`
+      };
+      const updated = [...prev, logItem];
+      return updated.length > 500 ? updated.slice(1) : updated;
+    });
+
+    try {
+      let succeededCount = 0;
+      for (const msg of unsyncedMessages) {
+        const res = await fetch("/api/message/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ to: msg.to, body: msg.body })
+        });
+        if (res.ok) {
+          succeededCount++;
+        }
+      }
+
+      setLogs((prev) => {
+        const logItem = {
+          id: Math.random().toString(),
+          timestamp: new Date().toLocaleTimeString(),
+          type: "success" as const,
+          message: `[P2P SYNC] Success: Synchronized ${succeededCount} out of ${unsyncedMessages.length} message frame(s) securely via mail transport.`
+        };
+        const updated = [...prev, logItem];
+        return updated.length > 500 ? updated.slice(1) : updated;
+      });
+
+      setUnsyncedMessages([]);
+    } catch (err: any) {
+      console.error(err);
+      setLogs((prev) => {
+        const logItem = {
+          id: Math.random().toString(),
+          timestamp: new Date().toLocaleTimeString(),
+          type: "error" as const,
+          message: `[P2P SYNC] Error: Network sync fail: ${err.message || err}`
+        };
+        const updated = [...prev, logItem];
+        return updated.length > 500 ? updated.slice(1) : updated;
+      });
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
   // Tabs: "chat" or "terminal"
   const [activeTab, setActiveTab] = useState<"chat" | "terminal">("chat");
@@ -80,6 +228,8 @@ export default function App() {
   const [manualPeerEmail, setManualPeerEmail] = useState("");
   const [showConfigAlert, setShowConfigAlert] = useState(false);
   const [logFilter, setLogFilter] = useState<"all" | "info" | "success" | "error" | "network">("all");
+  const [qrModalNode, setQrModalNode] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   // History tracking for terminal inputs
   const [terminalHistory, setTerminalHistory] = useState<string[]>([]);
@@ -191,9 +341,13 @@ export default function App() {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, activeChat, activeTab]);
 
+  // Auto-scroll the terminal view to the latest entry when new logs arrive
   useEffect(() => {
-    terminalEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [logs, activeTab]);
+    const timer = setTimeout(() => {
+      terminalEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, 50);
+    return () => clearTimeout(timer);
+  }, [logs]);
 
   // Handle configuration changes
   const handleSaveConfig = async (e: React.FormEvent) => {
@@ -245,6 +399,14 @@ export default function App() {
     }
   };
 
+  // Copy helper for modal
+  const handleCopyNodeEmail = () => {
+    if (!qrModalNode) return;
+    navigator.clipboard.writeText(qrModalNode);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
   // Trigger CLI execution
   const postCLICommand = async (cmdText: string) => {
     if (!cmdText.trim()) return;
@@ -271,6 +433,33 @@ export default function App() {
   const handleSendChatMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!chatInput.trim() || !activeChat) return;
+
+    if (isEffectivelyOffline) {
+      const localMsg: ChatMessage = {
+        id: "local_" + Math.random().toString(36).substring(2, 11),
+        from: config.email,
+        to: activeChat,
+        body: chatInput,
+        timestamp: new Date().toLocaleTimeString(),
+        simulated: true,
+      };
+
+      setMessages((prev) => [...prev, localMsg]);
+      setUnsyncedMessages((prev) => [...prev, localMsg]);
+      setChatInput("");
+
+      setLogs((prev) => {
+        const logItem: LogItem = {
+          id: Math.random().toString(),
+          timestamp: new Date().toLocaleTimeString(),
+          type: "network",
+          message: `[OFFLINE QUEUE] Message queued locally for ${activeChat}. Total unsynced: ${unsyncedMessages.length + 1}`
+        };
+        const updated = [...prev, logItem];
+        return updated.length > 500 ? updated.slice(1) : updated;
+      });
+      return;
+    }
 
     try {
       await fetch("/api/message/send", {
@@ -355,6 +544,65 @@ export default function App() {
 
   return (
     <div id="app_root" className="min-h-screen bg-sleek-bg font-sans text-[#e2e8f0] flex flex-col antialiased">
+      {/* Global Offline warning banner */}
+      <AnimatePresence>
+        {isEffectivelyOffline && (
+          <motion.div
+            id="offline_banner"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.25, ease: "easeInOut" }}
+            className="bg-gradient-to-r from-amber-600 to-amber-700 text-amber-50 border-b border-amber-500/30 px-6 py-2.5 flex flex-wrap items-center justify-between gap-4 text-xs font-medium tracking-wide z-50 sticky top-0 shadow-md overflow-hidden shrink-0"
+          >
+            <div className="flex items-center gap-2.5">
+              <AlertTriangle className="w-4 h-4 text-amber-300 animate-pulse shrink-0" />
+              <div>
+                <span className="font-bold text-white uppercase tracking-wider mr-2 bg-amber-800/80 px-1.5 py-0.5 rounded text-[9px] border border-amber-500/20">
+                  OFFLINE ACTIVE
+                </span>
+                <span>
+                  {unsyncedMessages.length > 0
+                    ? `You have ${unsyncedMessages.length} deferred chat message(s) cached locally. Reconnect to sync with P2P nodes.`
+                    : "P2P network environment is unreachable. Messages sent during network outage will auto-buffer in local state."
+                  }
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              {unsyncedMessages.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleSyncLocalMessages}
+                  disabled={isSyncing}
+                  className="px-3 py-1.5 rounded-md bg-white text-amber-950 font-bold hover:bg-amber-50 active:scale-95 transition-all text-[11.5px] flex items-center gap-1.5 cursor-pointer shadow-sm"
+                >
+                  {isSyncing ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      Syncing...
+                    </>
+                  ) : (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      Sync {unsyncedMessages.length} Message{unsyncedMessages.length !== 1 ? "s" : ""}
+                    </>
+                  )}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setSimulatedOffline(false)}
+                className="text-amber-200 hover:text-white transition font-mono text-[10px] bg-amber-800/40 px-2.5 py-1 rounded border border-amber-700/50 cursor-pointer animate-pulse"
+                title="Disable simulation test"
+              >
+                Disable Offline Test
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Upper Status / Header bar */}
       <header id="app_header" className="border-b border-sleek-border bg-sleek-card sticky top-0 z-30 px-6 py-4 flex flex-wrap justify-between items-center gap-4">
         <div className="flex items-center gap-4">
@@ -384,7 +632,17 @@ export default function App() {
           </div>
           <div className="flex flex-col border-l border-sleek-border pl-6">
             <span className="text-[#64748b] uppercase text-[9px] font-bold tracking-wider">Identity</span>
-            <span className="text-[#e2e8f0]">{config.email}</span>
+            <div className="flex items-center gap-1.5 mt-0.5">
+              <span className="text-[#e2e8f0] font-sans text-xs">{config.email}</span>
+              <button
+                type="button"
+                onClick={() => setQrModalNode(config.email)}
+                title="Показать мой QR-код для импорта"
+                className="p-1 rounded text-slate-500 hover:text-blue-400 hover:bg-sleek-border/40 transition cursor-pointer flex items-center justify-center shrink-0"
+              >
+                <QrCode className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
         </div>
       </header>
@@ -442,6 +700,19 @@ export default function App() {
                   Приостановить Core Daemon
                 </button>
               )}
+              
+              <button
+                type="button"
+                onClick={() => setSimulatedOffline(!simulatedOffline)}
+                className={`w-full py-2 px-4 rounded-lg text-xs font-semibold border transition flex items-center justify-center gap-2 cursor-pointer ${
+                  simulatedOffline
+                    ? "bg-amber-500/10 border-amber-500/40 text-amber-300 hover:bg-amber-500/20"
+                    : "bg-[#1a1d23]/40 border-slate-700 hover:bg-[#1a1d23] hover:text-[#e2e8f0] text-slate-300"
+                }`}
+              >
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                {simulatedOffline ? "Disable Outage (Go Online)" : "Simulate Outage (Go Offline)"}
+              </button>
             </div>
           </div>
 
@@ -496,16 +767,42 @@ export default function App() {
                     pingText = "unknown";
                   }
 
+                  const isHandshaking = handshakeQueue.some((h) => h.email === node);
+
                   return (
-                    <button
+                    <div
                       key={node}
+                      role="button"
+                      tabIndex={0}
                       onClick={() => handleSelectNodeChat(node)}
-                      className={`w-full text-left p-2 rounded border transition flex items-center justify-between gap-3 ${
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          handleSelectNodeChat(node);
+                        }
+                      }}
+                      className={`w-full text-left p-2 rounded border transition flex items-center justify-between gap-3 relative overflow-hidden cursor-pointer select-none ${
                         isActive
                           ? "bg-[#3b82f6]/10 border-[#3b82f6]/20 text-[#3b82f6]"
                           : "bg-[#1a1d23]/40 border-transparent text-[#94a3b8] hover:bg-[#1a1d23] hover:text-[#e2e8f0]"
                       }`}
                     >
+                      {isHandshaking && (
+                        <motion.div
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: [0, 1, 1, 0], scale: [0.98, 1, 1, 0.98] }}
+                          transition={{ duration: 3.5, times: [0, 0.1, 0.9, 1] }}
+                          className="absolute inset-0 border-2 border-emerald-500 rounded pointer-events-none shadow-[inset_0_0_12px_rgba(16,185,129,0.3)] bg-emerald-500/5 z-10"
+                        />
+                      )}
+                      {isHandshaking && (
+                        <motion.div
+                          initial={{ scale: 0.95, opacity: 0.8 }}
+                          animate={{ scale: 1.15, opacity: 0 }}
+                          transition={{ duration: 1.7, repeat: 1, ease: "easeOut" }}
+                          className="absolute inset-0 border border-emerald-400 rounded pointer-events-none z-0"
+                        />
+                      )}
                       <div className="flex items-center gap-2 overflow-hidden flex-1">
                         <div className={`w-2 h-2 rounded-full shrink-0 ${dotColor}`} />
                         <span className="text-xs truncate font-medium font-sans">
@@ -526,6 +823,31 @@ export default function App() {
                         
                         <button
                           type="button"
+                          onClick={(e) => handleCopyNode(e, node)}
+                          title="Copy address to clipboard"
+                          className="p-1 rounded text-[#64748b] hover:text-blue-400 hover:bg-sleek-card transition cursor-pointer shrink-0"
+                        >
+                          {copiedNode === node ? (
+                            <Check className="w-3 h-3 text-emerald-400 animate-pulse" />
+                          ) : (
+                            <Copy className="w-3 h-3" />
+                          )}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setQrModalNode(node);
+                          }}
+                          title="Показать QR-код узла"
+                          className="p-1 rounded text-[#64748b] hover:text-blue-400 hover:bg-sleek-card transition cursor-pointer shrink-0"
+                        >
+                          <QrCode className="w-3 h-3" />
+                        </button>
+
+                        <button
+                          type="button"
                           disabled={!daemonState.running}
                           onClick={(e) => handlePingNode(e, node)}
                           title="Отправить проверочный Heartbeat P2P-пакет"
@@ -536,7 +858,7 @@ export default function App() {
                         
                         <ArrowRight className={`w-3.5 h-3.5 shrink-0 transition ${isActive ? "text-blue-400 rotate-90" : "text-slate-600"}`} />
                       </div>
-                    </button>
+                    </div>
                   );
                 })
               )}
@@ -769,8 +1091,55 @@ export default function App() {
                 </div>
               ) : (
                 // Active chat section
-                <div className="flex-1 flex flex-col h-full overflow-hidden">
+                <div className="flex-1 flex flex-col h-full overflow-hidden relative">
                   
+                  {/* Live Handshake overlay for the active chat peer */}
+                  <AnimatePresence>
+                    {handshakeQueue.some((h) => h.email === activeChat) && (
+                      <motion.div
+                        initial={{ y: -60, opacity: 0 }}
+                        animate={{ y: 0, opacity: 1 }}
+                        exit={{ y: -60, opacity: 0 }}
+                        transition={{ type: "spring", stiffness: 120, damping: 15 }}
+                        className="absolute top-0 inset-x-0 z-30 bg-[#0c1912]/95 border-b border-emerald-500/30 p-2.5 flex flex-col items-center justify-center gap-1.5 shadow-lg shadow-black/80 overflow-hidden"
+                      >
+                        <div className="absolute inset-0 bg-[linear-gradient(to_right,#10b98110_1px,transparent_1px)] bg-[size:16px_16px] pointer-events-none opacity-30" />
+                        
+                        <div className="flex items-center gap-2 z-10">
+                          <Activity className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+                          <span className="text-[10px] font-bold text-emerald-400 font-mono tracking-widest uppercase">
+                            SECURE P2P HANDSHAKE COMPLETED SUCCESSFULLY
+                          </span>
+                        </div>
+
+                        <div className="flex items-center justify-between w-full max-w-md px-4 mt-1 z-10 text-[10px] font-mono text-slate-400">
+                          <div className="flex items-center gap-1 shrink-0 bg-slate-900/80 px-2 py-0.5 rounded border border-slate-800">
+                            <Shield className="w-3 h-3 text-blue-400 shrink-0" />
+                            <span className="truncate max-w-[85px]">{config.email}</span>
+                          </div>
+
+                          <div className="flex-1 mx-3 relative flex items-center h-4">
+                            <div className="w-full h-[1px] bg-slate-700" />
+                            <motion.div
+                              initial={{ left: "0%" }}
+                              animate={{ left: "100%" }}
+                              transition={{ duration: 1.5, repeat: 1, ease: "easeInOut" }}
+                              className="absolute w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_#10b981] -translate-y-1/2 top-1/2"
+                            />
+                            <span className="absolute inset-x-0 text-center text-[8px] text-emerald-400/80 select-none leading-none -top-1 font-sans">
+                              MIME PROTOCOL DECRYPTED
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-1 shrink-0 bg-slate-900/80 px-2 py-0.5 rounded border border-slate-800">
+                            <Users className="w-3 h-3 text-emerald-400 shrink-0" />
+                            <span className="truncate max-w-[85px]">{activeChat}</span>
+                          </div>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
                   {/* Chat details bar */}
                   <div className="p-3 bg-[#0f1115]/50 border-b border-sleek-border flex justify-between items-center px-4">
                     <div className="flex items-center gap-2">
@@ -1090,6 +1459,90 @@ export default function App() {
       <footer className="py-2.5 text-center text-[10px] text-[#64748b] border-t border-sleek-border bg-sleek-footer mt-auto select-none">
         P2P Mail Chat client interface is powered by an asynchronous Node/Typescript server bridging real-time SSE stream telemetry. All rights reserved.
       </footer>
+
+      {/* QR Code Modal Overlay */}
+      {qrModalNode && (
+        <div id="qr_modal" className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm">
+          <div className="bg-[#15181e] border border-sleek-border rounded-xl shadow-2xl max-w-sm w-full overflow-hidden flex flex-col">
+            {/* Header */}
+            <div className="p-4 border-b border-sleek-border flex items-center justify-between bg-sleek-card">
+              <div className="flex items-center gap-2">
+                <QrCode className="w-5 h-5 text-blue-400" />
+                <h3 className="text-sm font-semibold text-white tracking-wide">
+                  P2P Node QR Identity
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setQrModalNode(null);
+                  setCopied(false);
+                }}
+                className="p-1.5 rounded-lg text-slate-500 hover:text-white hover:bg-sleek-border/40 transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Content with centered QR */}
+            <div className="p-6 flex flex-col items-center justify-center text-center bg-sleek-bg gap-5">
+              <div className="bg-white p-4 rounded-lg shadow-inner flex items-center justify-center">
+                <QRCodeSVG
+                  value={qrModalNode}
+                  size={192}
+                  level="H"
+                  includeMargin={true}
+                />
+              </div>
+
+              <div className="space-y-1.5 w-full">
+                <span className="text-[10px] text-[#64748b] uppercase font-bold tracking-widest font-mono block">
+                  Адрес P2P-Узла
+                </span>
+                <span className="text-xs font-mono font-bold text-blue-300 break-all select-all block bg-slate-950/40 p-2.5 rounded border border-sleek-border/60">
+                  {qrModalNode}
+                </span>
+              </div>
+
+              <p className="text-[11px] text-[#64748b] leading-relaxed max-w-xs block font-sans">
+                Этот QR-код содержит email-адрес децентрализованного узла. Отсканируйте его камерой смартфона или импортируйте для мгновенного установления шифрованного сокет-канала.
+              </p>
+            </div>
+
+            {/* Footer with actions */}
+            <div className="p-4 border-t border-sleek-border bg-sleek-card flex gap-3">
+              <button
+                type="button"
+                onClick={handleCopyNodeEmail}
+                className="flex-1 py-2 px-3 bg-sleek-border hover:bg-sleek-border/80 border border-slate-700 text-slate-300 hover:text-white rounded-lg text-xs font-semibold cursor-pointer transition flex items-center justify-center gap-1.5 select-none"
+              >
+                {copied ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-emerald-450 animate-pulse" />
+                    Скопировано!
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5 text-slate-400" />
+                    Скопировать адрес
+                  </>
+                )}
+              </button>
+              
+              <button
+                type="button"
+                onClick={() => {
+                  setQrModalNode(null);
+                  setCopied(false);
+                }}
+                className="py-2 px-4 bg-[#3b82f6] hover:bg-blue-600 border border-blue-500 text-white rounded-lg text-xs font-semibold cursor-pointer transition select-none"
+              >
+                Закрыть
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
