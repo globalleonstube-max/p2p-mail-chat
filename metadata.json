@@ -1,0 +1,6 @@
+{
+  "name": "P2P Mail Chat",
+  "description": "Decentralized P2P chat client using email (SMTP/IMAP) as the transport layer, with real-time logs, live daemon console, and integrated simulation nodes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
